@@ -5,11 +5,11 @@
 ```
 telescope/
 ├── src/
-│   ├── camera.py          ← camera abstraction layer (PC ↔ Raspberry)
+│   ├── camera.py          ← camera abstraction layer (PC ↔ Raspberry Pi)
 │   ├── moon_detector.py   ← moon detector (refactored HoughCircles)
 │   └── run_detector.py    ← dev script with live parameter sliders
 ├── videos/
-│   └── test.mp4           ← test video
+│   └── test.mp4           ← test video (used on PC)
 └── requirements.txt
 ```
 
@@ -18,24 +18,46 @@ telescope/
 ## Setup on PC
 
 ```bash
+python3 -m venv venv
+source venv/bin/activate       # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+```
+
+## Setup on Raspberry Pi
+
+`picamera2` is a system package and cannot be installed via pip. The venv must be created with `--system-site-packages` so it can see it:
+
+```bash
+sudo apt update
+sudo apt install -y python3-picamera2
+
+python3 -m venv venv --system-site-packages
+source venv/bin/activate
+pip install opencv-python numpy
+```
+
+To verify everything is working:
+```bash
+python3 -c "import picamera2; print('picamera2 OK')"
+rpicam-hello --list-cameras   # should list your camera
 ```
 
 ---
 
-## Running the detector (PC)
+## Running the detector
 
+**On PC** — uses the test video by default:
 ```bash
-cd telescope
-
-# Using the test video (default)
+source venv/bin/activate
 python src/run_detector.py
+python src/run_detector.py --source video --path videos/test.mp4  # explicit
+python src/run_detector.py --source webcam                         # webcam
+```
 
-# Using a webcam
-python src/run_detector.py --source webcam
-
-# Using a different video file
-python src/run_detector.py --source video --path videos/other.mp4
+**On Raspberry Pi** — uses the AI Camera:
+```bash
+source venv/bin/activate
+python src/run_detector.py --source picamera2
 ```
 
 Two windows will open: the video feed with the detection overlay, and a sliders panel.
@@ -71,20 +93,20 @@ All parameters live in `DetectorConfig` inside `moon_detector.py`:
 - [ ] `motor.py` — motor abstraction (MockMotor on PC / StepperMotor on RPi)
 - [ ] `pid.py` — PID controller for position servo loop
 - [ ] `main.py` — main loop: capture → detect → PID → command motor
-- [ ] Deploy to Raspberry Pi and test with the real camera
+- [ ] Tune detector parameters with the real camera
 
 ---
 
-## Deploying to Raspberry Pi
+## Switching between PC and Raspberry Pi
 
-Only one line needs to change — the camera source:
+Only one line changes — the camera source passed to `create_camera()`:
 
 ```python
-# PC
+# PC — video file
 cam = create_camera(source="video", path="videos/test.mp4")
 
-# Raspberry Pi AI Camera
+# Raspberry Pi AI Camera (imx500)
 cam = create_camera(source="picamera2", width=1280, height=720)
 ```
 
-Everything else stays the same.
+Everything else (detector, PID, motor control) stays the same.
