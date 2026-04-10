@@ -73,21 +73,32 @@ class PIDSettings:
 
 @dataclass
 class MotorSettings:
-    """Stepper motor parameters (28BYJ-48 via ULN2003)."""
+    """
+    Stepper motor parameters for STEP/DIR driver boards (A4988 / DRV8825).
+
+    Each axis uses two GPIO pins:
+      dir_pin  — sets rotation direction (HIGH = CW, LOW = CCW)
+      step_pin — one rising edge = one step
+
+    Steps per revolution depends on your motor + microstepping config:
+      Full step  : 200  (1.8° motor)
+      Half step  : 400
+      1/16 step  : 3200  (typical for smooth tracking)
+    """
 
     # Azimuth motor GPIO pins (BCM numbering)
-    az_pin_in1: int = 2
-    az_pin_in2: int = 3
-    az_pin_in3: int = 14
-    az_pin_in4: int = 22
+    az_dir_pin:  int = 26
+    az_step_pin: int = 19
 
     # Elevation motor GPIO pins
-    el_pin_in1: int = 6
-    el_pin_in2: int = 13
-    el_pin_in3: int = 19
-    el_pin_in4: int = 26
+    el_dir_pin:  int = 21
+    el_step_pin: int = 20
 
-    step_delay: float = 0.001   # seconds between half-steps (1 ms minimum)
+    # Step timing
+    step_delay: float = 0.0005   # seconds between steps (~2000 steps/s max)
+
+    # Motor resolution — change if you use microstepping
+    steps_per_rev: int = 200     # 200 = 1.8° motor, full step
 
     # How many stepper steps per pixel of PID correction
     steps_per_pixel: float = 0.5
@@ -129,5 +140,5 @@ class Config:
     camera:   CameraSettings   = field(default_factory=CameraSettings)
 
 
-# Singleton — modules do `from config.settings import CFG`
+# Singleton — modules do `from config import CFG`
 CFG = Config()

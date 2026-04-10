@@ -11,8 +11,12 @@ Two modes (--mode flag):
 
   live
       Runs with the real Pi Camera + stepper motors (Raspberry Pi only).
-      PID corrections are converted to half-steps and sent to two
-      StepperMotor instances (azimuth + elevation).
+      PID corrections are converted to steps and sent to two StepperMotor
+      instances (azimuth + elevation).
+
+      Camera priority: picamera2 → webcam (index 0) → error.
+      This means the script still runs if picamera2 is not available or
+      fails to open (e.g. wrong ribbon cable, missing libcamera stack).
 
 Controls (both modes):
   SPACE  — pause / resume
@@ -23,6 +27,7 @@ Usage:
   python scripts/main.py                              # simulate, default video
   python scripts/main.py --mode simulate --path videos/test.mp4
   python scripts/main.py --mode live                  # Raspberry Pi only
+  python scripts/main.py --mode live --camera webcam  # force webcam
 """
 
 import argparse
@@ -43,6 +48,51 @@ from src.control    import PID
 from src.hardware   import create_camera
 from src.utils      import (draw_crosshair, draw_arrow,
                              draw_panel, draw_error_bars, draw_legend)
+
+
+# ---------------------------------------------------------------------------
+# Camera helper for live mode
+# ---------------------------------------------------------------------------
+
+def _open_live_camera(args):
+    """
+    Try to open the best available camera for live mode.
+
+    Priority (unless --camera is specified):
+      1. picamera2  — Raspberry Pi camera module
+      2. webcam     — USB webcam via OpenCV (index 0)
+
+    Returns an opened BaseCamera, or None on failure.
+    """
+    w = args.width  or CFG.camera.width
+    h = args.height or CFG.camera.height
+
+    sources = []
+    if args.camera == "webcam":
+        sources = ["webcam"]
+    elif args.camera == "picamera2":
+        sources = ["picamera2"]
+    else:
+        # Auto: try picamera2 first, fall back to webcam
+        sources = ["picamera2", "webcam"]
+
+    for source in sources:
+        print(f"[camera] Trying {source} …")
+        try:
+            if source == "picamera2":
+                cam = create_camera("picamera2", width=w, height=h)
+            else:
+                cam = create_camera("webcam", index=args.webcam_index or 0)
+
+            if cam.open():
+                print(f"[camera] Opened {source}  ({cam.width}×{cam.height})")
+                return cam
+            else:
+                print(f"[camera] {source} reported open() = False, skipping.")
+        except Exception as exc:
+            print(f"[camera] {source} failed: {exc}")
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -198,35 +248,41 @@ def run_simulate(args) -> None:
 # ---------------------------------------------------------------------------
 
 def run_live(args) -> None:
-    from src.hardware import StepperMotor
+    from src.hardware.motor import StepperMotor
 
-    cam = create_camera(
-        "picamera2",
-        width  = args.width  or CFG.camera.width,
-        height = args.height or CFG.camera.height,
-    )
-    if not cam.open():
-        print("[ERROR] Could not open Pi Camera.")
+    # --- Camera -----------------------------------------------------------
+    cam = _open_live_camera(args)
+    if cam is None:
+        print(
+            "[ERROR] No camera could be opened.\n"
+            "  • Check the ribbon cable and run: libcamera-hello --list-cameras\n"
+            "  • Or pass --camera webcam to use a USB camera."
+        )
         return
 
-    detector = MoonDetector()
-    pid_x    = PID()
-    pid_y    = PID()
-
-    # Azimuth motor uses default pins; elevation uses config override
-    motor_x = StepperMotor(
-        pin_in1=CFG.motor.az_pin_in1, pin_in2=CFG.motor.az_pin_in2,
-        pin_in3=CFG.motor.az_pin_in3, pin_in4=CFG.motor.az_pin_in4,
-        step_delay=CFG.motor.step_delay,
+    # --- Motors -----------------------------------------------------------
+    # Use pin values from config/settings.py (MotorSettings)
+    motor_az = StepperMotor(
+        dir_pin      = CFG.motor.az_dir_pin,
+        step_pin     = CFG.motor.az_step_pin,
+        step_delay   = CFG.motor.step_delay,
+        steps_per_rev= CFG.motor.steps_per_rev,
     )
-    motor_y = StepperMotor(
-        pin_in1=CFG.motor.el_pin_in1, pin_in2=CFG.motor.el_pin_in2,
-        pin_in3=CFG.motor.el_pin_in3, pin_in4=CFG.motor.el_pin_in4,
-        step_delay=CFG.motor.step_delay,
+    motor_el = StepperMotor(
+        dir_pin      = CFG.motor.el_dir_pin,
+        step_pin     = CFG.motor.el_step_pin,
+        step_delay   = CFG.motor.step_delay,
+        steps_per_rev= CFG.motor.steps_per_rev,
     )
 
+    detector  = MoonDetector()
+    pid_x     = PID()
+    pid_y     = PID()
     last_time = time.monotonic()
+
     print("Live mode started.  Ctrl+C to stop.")
+    print(f"  AZ motor : DIR=GPIO{CFG.motor.az_dir_pin}  STEP=GPIO{CFG.motor.az_step_pin}")
+    print(f"  EL motor : DIR=GPIO{CFG.motor.el_dir_pin}  STEP=GPIO{CFG.motor.el_step_pin}")
 
     try:
         while True:
@@ -236,6 +292,7 @@ def run_live(args) -> None:
 
             ok, frame = cam.read()
             if not ok:
+                print("[WARN] Frame read failed — skipping.")
                 continue
 
             result = detector.detect(frame)
@@ -248,12 +305,9 @@ def run_live(args) -> None:
                 steps_y = int(correction_y * CFG.motor.steps_per_pixel)
 
                 if steps_x:
-                    motor_x.step(steps_x)
+                    motor_az.step(steps_x)
                 if steps_y:
-                    motor_y.step(steps_y)
-
-                motor_x.release()
-                motor_y.release()
+                    motor_el.step(steps_y)
 
                 print(
                     f"err=({result.offset_x:+4d},{result.offset_y:+4d})px  "
@@ -268,8 +322,8 @@ def run_live(args) -> None:
     except KeyboardInterrupt:
         print("\nStopped by user.")
     finally:
-        motor_x.cleanup()
-        motor_y.cleanup()
+        motor_az.cleanup()
+        motor_el.cleanup()
         cam.close()
 
 
@@ -286,6 +340,17 @@ if __name__ == "__main__":
     parser.add_argument(
         "--path", default=None,
         help="Video path for simulate mode (default: videos/test.mp4)",
+    )
+    parser.add_argument(
+        "--camera", default="auto", choices=["auto", "picamera2", "webcam"],
+        help=(
+            "Camera source for live mode (default: auto). "
+            "'auto' tries picamera2 first, falls back to webcam."
+        ),
+    )
+    parser.add_argument(
+        "--webcam-index", type=int, default=0,
+        help="USB webcam device index for --camera webcam (default: 0)",
     )
     parser.add_argument("--width",  type=int, default=None, help="Camera width (live)")
     parser.add_argument("--height", type=int, default=None, help="Camera height (live)")
