@@ -100,7 +100,7 @@ class StepperMotor:
             return
 
         direction = 1 if n > 0 else -1
-        self._GPIO.output(self._dir_pin, GPIO.HIGH if direction > 0 else GPIO.LOW)
+        self._GPIO.output(self._dir_pin, self._GPIO.HIGH if direction > 0 else self._GPIO.LOW)
 
         # Small settle time after direction change
         time.sleep(_STEP_PULSE_WIDTH)
