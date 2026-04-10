@@ -1,5 +1,4 @@
 # Vision-Guided Telescope
-
 A Raspberry Pi telescope mount that uses computer vision to lock onto and
 track the moon in real time.  A PID controller converts the detected
 pixel offset into stepper-motor commands, keeping the moon centred in the
@@ -8,7 +7,6 @@ frame as it drifts.
 ---
 
 ## Project structure
-
 ```
 telescope/
 ├── config/
@@ -21,7 +19,7 @@ telescope/
 │   │   └── pid.py           ← PID controller (single axis)
 │   ├── hardware/
 │   │   ├── camera.py        ← video file / webcam / picamera2 abstraction
-│   │   └── motor.py         ← 28BYJ-48 stepper via ULN2003
+│   │   └── motor.py         ← STEP/DIR stepper driver (A4988 / DRV8825)
 │   └── utils/
 │       └── overlay.py       ← OpenCV HUD drawing helpers
 ├── scripts/
@@ -39,13 +37,11 @@ telescope/
 ## Quick start
 
 ### 1 — Install dependencies
-
 ```bash
 pip install -r requirements.txt
 ```
 
 ### 2 — Run the simulation (no hardware needed)
-
 ```bash
 python scripts/main.py
 # or explicitly:
@@ -61,17 +57,14 @@ Keyboard shortcuts while the window is open:
 | `Q`/`ESC` | Quit                       |
 
 ### 3 — Tune the detector
-
 ```bash
 python scripts/tune_detector.py
 ```
-
 Adjust the sliders live.  When you find good values, copy them into
 `config/settings.py` → `DetectorSettings`.  The tuner prints the final
 values as ready-to-paste Python when you close it.
 
 ### 4 — Run on Raspberry Pi (live mode)
-
 ```bash
 python scripts/main.py --mode live
 ```
@@ -106,21 +99,60 @@ mode:
 
 ---
 
-## Hardware — 28BYJ-48 + ULN2003
+## Hardware — STEP/DIR stepper motors (A4988 / DRV8825)
 
-Default GPIO wiring (BCM):
+The mount uses two stepper motors controlled by STEP/DIR driver boards
+(A4988, DRV8825, or compatible).  Each axis requires only two GPIO pins:
+**DIR** sets the rotation direction and **STEP** advances the motor one
+step per pulse.
+
+### GPIO wiring (BCM numbering)
 
 ```
-Azimuth  : IN1=GPIO2  IN2=GPIO3  IN3=GPIO14  IN4=GPIO22
-Elevation: IN1=GPIO6  IN2=GPIO13 IN3=GPIO19  IN4=GPIO26
+Azimuth   : DIR=GPIO26   STEP=GPIO19
+Elevation : DIR=GPIO21   STEP=GPIO20
 ```
 
 Override in `config/settings.py` → `MotorSettings` if your wiring differs.
 
+### Driver board setup
+
+| MS pin config | Steps/rev (1.8° motor) | Use case |
+|---|---|---|
+| Full step      | 200   | Fast slew, low torque smoothness |
+| Half step      | 400   | Good balance                     |
+| 1/16 step      | 3200  | Quiet, precise tracking          |
+
+Set `STEPS_PER_REVOLUTION` in `motor.py` (or `MotorSettings`) to match
+your chosen microstepping factor.  Tracking accuracy depends on this
+value being correct.
+
+### VREF / current limit
+
+Before connecting motors, set the VREF trim-pot on each driver board to
+limit current to your motor's rated value (check the datasheet).
+Exceeding the rated current will overheat the driver and motor.
+
+### Wiring diagram (per axis)
+
+```
+Raspberry Pi              Driver board           Stepper motor
+──────────────            ────────────           ─────────────
+GPIO 26 (DIR)  ────────►  DIR
+GPIO 19 (STEP) ────────►  STEP
+GND            ────────►  GND
+3.3 V          ────────►  LOGIC VCC
+                          VMOT  ◄──── 12 V supply
+                          GND   ◄──── 12 V GND
+                          1A/1B/2A/2B ──────────► Motor coils
+```
+
+> **Note:** VMOT and logic VCC share a common GND.  Always connect GND
+> before powering VMOT to avoid latch-up on the driver IC.
+
 ---
 
 ## Running tests
-
 ```bash
 python -m pytest tests/ -v
 # or without pytest:
