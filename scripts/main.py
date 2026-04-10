@@ -13,6 +13,8 @@ Two modes (--mode flag):
       Runs with the real Pi Camera + stepper motors (Raspberry Pi only).
       PID corrections are converted to steps and sent to two StepperMotor
       instances (azimuth + elevation).
+      A full HUD window is shown — identical to simulate mode — so you
+      can watch the PID work in real time while the motors run.
 
       Camera priority: picamera2 → webcam (index 0) → error.
       This means the script still runs if picamera2 is not available or
@@ -48,6 +50,13 @@ from src.control    import PID
 from src.hardware   import create_camera
 from src.utils      import (draw_crosshair, draw_arrow,
                              draw_panel, draw_error_bars, draw_legend)
+
+
+# ---------------------------------------------------------------------------
+# Window name — shared by both modes so there is always exactly one window
+# ---------------------------------------------------------------------------
+
+WIN = "Telescope — Vision Tracker  (Q to quit)"
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +105,78 @@ def _open_live_camera(args):
 
 
 # ---------------------------------------------------------------------------
+# Shared HUD drawing
+# ---------------------------------------------------------------------------
+
+def _build_hud(frame, result, pid_x, pid_y, correction_x, correction_y,
+               dt, frame_count, mode_label, extra_rows=None):
+    """
+    Draw all HUD elements onto *frame* (in-place) and return it.
+
+    Parameters
+    ----------
+    extra_rows : list of (label, value) tuples appended to the info panel.
+                 Used by live mode to show motor step counts.
+    """
+    h, w  = frame.shape[:2]
+    cx, cy = w // 2, h // 2
+
+    # Target centre — red crosshair
+    draw_crosshair(frame, cx, cy, (0, 0, 220), size=18, thickness=2)
+    cv2.circle(frame, (cx, cy), 3, (0, 0, 220), -1)
+
+    if result.found:
+        # Real moon — green circle + crosshair
+        cv2.circle(frame, (result.cx, result.cy), result.radius,
+                   (0, 210, 0), 2, cv2.LINE_AA)
+        draw_crosshair(frame, result.cx, result.cy, (0, 210, 0))
+        cv2.circle(frame, (result.cx, result.cy), 3, (0, 210, 0), -1)
+
+        # PID correction arrow from centre toward correction direction
+        arr_x = max(0, min(w - 1, cx + int(correction_x * 0.4)))
+        arr_y = max(0, min(h - 1, cy + int(correction_y * 0.4)))
+        draw_arrow(frame, cx, cy, arr_x, arr_y, (0, 200, 255), thickness=2)
+
+        nx, ny = result.offset_normalized
+        steps_x = int(correction_x * CFG.motor.steps_per_pixel)
+        steps_y = int(correction_y * CFG.motor.steps_per_pixel)
+
+        info = [
+            ("Mode",         mode_label),
+            ("Moon centre",  f"({result.cx}, {result.cy})"),
+            ("Error X",      f"{result.offset_x:+d} px"),
+            ("Error Y",      f"{result.offset_y:+d} px"),
+            ("Error norm X", f"{nx:+.3f}"),
+            ("Error norm Y", f"{ny:+.3f}"),
+            ("PID out X",    f"{correction_x:+.1f}"),
+            ("PID out Y",    f"{correction_y:+.1f}"),
+            ("Steps X",      f"{steps_x:+d}"),
+            ("Steps Y",      f"{steps_y:+d}"),
+            ("Integral X",   f"{pid_x.integral:.2f}"),
+            ("Integral Y",   f"{pid_y.integral:.2f}"),
+            ("dt",           f"{dt * 1000:.1f} ms"),
+            ("Frame",        str(frame_count)),
+        ]
+
+        draw_error_bars(frame, result.offset_x, result.offset_y)
+
+    else:
+        info = [
+            ("Mode",  mode_label),
+            ("Moon",  "NOT DETECTED"),
+            ("Frame", str(frame_count)),
+            ("PID",   "reset"),
+        ]
+
+    if extra_rows:
+        info.extend(extra_rows)
+
+    draw_panel(frame, info, x=8, y=8, width=310)
+    draw_legend(frame)
+    return frame
+
+
+# ---------------------------------------------------------------------------
 # Simulate mode
 # ---------------------------------------------------------------------------
 
@@ -119,7 +200,6 @@ def run_simulate(args) -> None:
     last_time   = time.monotonic()
     last_frame  = None
 
-    WIN = "Telescope — PID Simulation  (Q to quit)"
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
 
     print("PID simulation started.")
@@ -143,22 +223,16 @@ def run_simulate(args) -> None:
             frame = last_frame
             dt    = 0.0
 
-        h, w  = frame.shape[:2]
+        h, w   = frame.shape[:2]
         cx, cy = w // 2, h // 2
         result: DetectionResult = detector.detect(frame)
         out = frame.copy()
 
-        # Target centre — red crosshair
-        draw_crosshair(out, cx, cy, (0, 0, 220), size=18, thickness=2)
-        cv2.circle(out, (cx, cy), 3, (0, 0, 220), -1)
+        # Compute PID first so we can pass corrections into the HUD builder
+        correction_x = correction_y = 0.0
+        sim_extra = []
 
         if result.found:
-            # Real moon — green circle + crosshair
-            cv2.circle(out, (result.cx, result.cy), result.radius,
-                       (0, 210, 0), 2, cv2.LINE_AA)
-            draw_crosshair(out, result.cx, result.cy, (0, 210, 0))
-            cv2.circle(out, (result.cx, result.cy), 3, (0, 210, 0), -1)
-
             correction_x = pid_x.update(float(result.offset_x), dt)
             correction_y = pid_y.update(float(result.offset_y), dt)
 
@@ -175,50 +249,22 @@ def run_simulate(args) -> None:
             draw_crosshair(out, ghost_x, ghost_y, (220, 100, 0), size=14)
             cv2.circle(out, (ghost_x, ghost_y), 3, (220, 100, 0), -1)
 
-            # PID correction arrow
-            arr_x = max(0, min(w - 1, cx + int(correction_x * 0.4)))
-            arr_y = max(0, min(h - 1, cy + int(correction_y * 0.4)))
-            draw_arrow(out, cx, cy, arr_x, arr_y, (0, 200, 255), thickness=2)
-
-            steps_x = int(correction_x * CFG.motor.steps_per_pixel)
-            steps_y = int(correction_y * CFG.motor.steps_per_pixel)
-            nx, ny  = result.offset_normalized
-
-            info = [
-                ("Moon centre",   f"({result.cx}, {result.cy})"),
-                ("Error X",       f"{result.offset_x:+d} px"),
-                ("Error Y",       f"{result.offset_y:+d} px"),
-                ("Error norm X",  f"{nx:+.3f}"),
-                ("Error norm Y",  f"{ny:+.3f}"),
-                ("PID out X",     f"{correction_x:+.1f}"),
-                ("PID out Y",     f"{correction_y:+.1f}"),
-                ("Steps X",       f"{steps_x:+d}"),
-                ("Steps Y",       f"{steps_y:+d}"),
-                ("Sim offset X",  f"{sim_offset_x:+.1f} px"),
-                ("Sim offset Y",  f"{sim_offset_y:+.1f} px"),
-                ("Ghost pos",     f"({ghost_x}, {ghost_y})"),
-                ("Integral X",    f"{pid_x.integral:.2f}"),
-                ("Integral Y",    f"{pid_y.integral:.2f}"),
-                ("dt",            f"{dt * 1000:.1f} ms"),
-                ("Frame",         str(frame_count)),
+            sim_extra = [
+                ("Sim offset X", f"{sim_offset_x:+.1f} px"),
+                ("Sim offset Y", f"{sim_offset_y:+.1f} px"),
+                ("Ghost pos",    f"({ghost_x}, {ghost_y})"),
             ]
-
-            draw_error_bars(out, result.offset_x, result.offset_y)
-
         else:
             pid_x.reset()
             pid_y.reset()
             sim_offset_x *= 0.9
             sim_offset_y *= 0.9
 
-            info = [
-                ("Moon",  "NOT DETECTED"),
-                ("Frame", str(frame_count)),
-                ("PID",   "reset"),
-            ]
-
-        draw_panel(out, info, x=8, y=8, width=310)
-        draw_legend(out)
+        _build_hud(out, result, pid_x, pid_y,
+                   correction_x, correction_y,
+                   dt, frame_count,
+                   mode_label="SIMULATE",
+                   extra_rows=sim_extra)
 
         if paused:
             cv2.putText(out, "PAUSED", (w // 2 - 38, 30),
@@ -261,28 +307,35 @@ def run_live(args) -> None:
         return
 
     # --- Motors -----------------------------------------------------------
-    # Use pin values from config/settings.py (MotorSettings)
     motor_az = StepperMotor(
-        dir_pin      = CFG.motor.az_dir_pin,
-        step_pin     = CFG.motor.az_step_pin,
-        step_delay   = CFG.motor.step_delay,
-        steps_per_rev= CFG.motor.steps_per_rev,
+        dir_pin       = CFG.motor.az_dir_pin,
+        step_pin      = CFG.motor.az_step_pin,
+        step_delay    = CFG.motor.step_delay,
+        steps_per_rev = CFG.motor.steps_per_rev,
     )
     motor_el = StepperMotor(
-        dir_pin      = CFG.motor.el_dir_pin,
-        step_pin     = CFG.motor.el_step_pin,
-        step_delay   = CFG.motor.step_delay,
-        steps_per_rev= CFG.motor.steps_per_rev,
+        dir_pin       = CFG.motor.el_dir_pin,
+        step_pin      = CFG.motor.el_step_pin,
+        step_delay    = CFG.motor.step_delay,
+        steps_per_rev = CFG.motor.steps_per_rev,
     )
 
     detector  = MoonDetector()
     pid_x     = PID()
     pid_y     = PID()
     last_time = time.monotonic()
+    frame_count = 0
 
-    print("Live mode started.  Ctrl+C to stop.")
+    paused = False
+    last_frame = None
+
+    # --- Window -----------------------------------------------------------
+    cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
+
+    print("Live mode started.")
     print(f"  AZ motor : DIR=GPIO{CFG.motor.az_dir_pin}  STEP=GPIO{CFG.motor.az_step_pin}")
     print(f"  EL motor : DIR=GPIO{CFG.motor.el_dir_pin}  STEP=GPIO{CFG.motor.el_step_pin}")
+    print("  Press Q or ESC in the window to quit, SPACE to pause.\n")
 
     try:
         while True:
@@ -290,12 +343,31 @@ def run_live(args) -> None:
             dt  = now - last_time
             last_time = now
 
-            ok, frame = cam.read()
-            if not ok:
-                print("[WARN] Frame read failed — skipping.")
-                continue
+            # ---- Frame acquisition ---------------------------------------
+            if not paused:
+                ok, frame = cam.read()
+                if not ok:
+                    print("[WARN] Frame read failed — skipping.")
+                    # Still show last good frame so the window stays alive
+                    if last_frame is not None:
+                        cv2.imshow(WIN, last_frame)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key in (ord('q'), 27):
+                        break
+                    continue
+                last_frame = frame
+                frame_count += 1
+            else:
+                frame = last_frame
+                dt    = 0.0
 
+            # ---- Detection + PID -----------------------------------------
             result = detector.detect(frame)
+            out    = frame.copy()
+
+            correction_x = correction_y = 0.0
+            steps_x = steps_y = 0
+            live_extra = []
 
             if result.found:
                 correction_x = pid_x.update(float(result.offset_x), dt)
@@ -304,10 +376,17 @@ def run_live(args) -> None:
                 steps_x = int(correction_x * CFG.motor.steps_per_pixel)
                 steps_y = int(correction_y * CFG.motor.steps_per_pixel)
 
-                if steps_x:
-                    motor_az.step(steps_x)
-                if steps_y:
-                    motor_el.step(steps_y)
+                # Drive motors only when not paused
+                if not paused:
+                    if steps_x:
+                        motor_az.step(steps_x)
+                    if steps_y:
+                        motor_el.step(steps_y)
+
+                live_extra = [
+                    ("Motor AZ steps", f"{steps_x:+d}"),
+                    ("Motor EL steps", f"{steps_y:+d}"),
+                ]
 
                 print(
                     f"err=({result.offset_x:+4d},{result.offset_y:+4d})px  "
@@ -319,12 +398,38 @@ def run_live(args) -> None:
                 pid_y.reset()
                 print("Moon not detected — PID reset")
 
+            # ---- HUD -----------------------------------------------------
+            _build_hud(out, result, pid_x, pid_y,
+                       correction_x, correction_y,
+                       dt, frame_count,
+                       mode_label="LIVE",
+                       extra_rows=live_extra)
+
+            if paused:
+                h, w = out.shape[:2]
+                cv2.putText(out, "PAUSED", (w // 2 - 38, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2)
+
+            cv2.imshow(WIN, out)
+
+            # ---- Key handling --------------------------------------------
+            # waitKey(1) keeps the window responsive without stalling capture
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord('q'), 27):
+                break
+            elif key == ord(' '):
+                paused = not paused
+                state = "PAUSED — motors stopped" if paused else "RESUMED"
+                print(f"[{state}]")
+
     except KeyboardInterrupt:
-        print("\nStopped by user.")
+        print("\nStopped by user (Ctrl+C).")
     finally:
         motor_az.cleanup()
         motor_el.cleanup()
         cam.close()
+        cv2.destroyAllWindows()
+        print("Done.")
 
 
 # ---------------------------------------------------------------------------
